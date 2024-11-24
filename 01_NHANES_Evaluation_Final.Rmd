@@ -1,0 +1,1847 @@
+---
+title: "Evaluation of DNAm-Predictor Performance"
+output: html_document
+date: '2024-11-17'
+---
+
+**Complete code for "Influence of Race, Ethnicity, and Sex on the Performance of Epigenetic Predictors of Phenotypic Traits"**  
+
+# Load Data
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+library(haven)
+library(tidyverse)
+library(Metrics)
+library(gridExtra)
+library(survey) 
+library(forcats)
+library(ggsci)
+set.seed(999)
+
+# clocks dataset
+# https://wwwn.cdc.gov/nchs/nhanes/dnam/
+clocks <- read_sas("Comparison_Project/dnmepi.sas7bdat") # 2532 true sample size
+
+# demographics
+demo_1999 <- read_xpt("Comparison_Project/DEMO.XPT") 
+demo_2001 <- read_xpt("Comparison_Project/DEMO_B.XPT")
+subs <- intersect(colnames(demo_1999), colnames(demo_2001))
+demo_1999 <- demo_1999 %>% select(all_of(subs))
+demo_2001 <- demo_2001 %>% select(all_of(subs))
+demo <- rbind(demo_1999, demo_2001)
+clocks <- left_join(clocks, demo, by = "SEQN")
+rm(list = setdiff(ls(), c("clocks")))
+
+# cell counts
+cell_1999 <- read_xpt("Comparison_Project/LAB25.XPT") 
+cell_2001 <- read_xpt("Comparison_Project/L25_B.XPT")
+subs <- intersect(colnames(cell_1999), colnames(cell_2001))
+cell_1999 <- cell_1999 %>% select(all_of(subs))
+cell_2001 <- cell_2001 %>% select(all_of(subs))
+cell <- rbind(cell_1999, cell_2001)
+clocks <- left_join(clocks, cell, by = "SEQN")
+rm(list = setdiff(ls(), c("clocks")))
+
+# b2m, cyst_c
+b2m <- read_xpt("Comparison_Project/SSCARD_A.XPT") 
+clocks <- left_join(clocks, b2m, by = "SEQN")
+
+# add c reactive protein
+cell_1999 <- read_xpt("Comparison_Project/LAB11.XPT") 
+cell_2001 <- read_xpt("Comparison_Project/L11_B.XPT")
+subs <- intersect(colnames(cell_1999), colnames(cell_2001))
+cell_1999 <- cell_1999 %>% select(all_of(subs))
+cell_2001 <- cell_2001 %>% select(all_of(subs))
+cell <- rbind(cell_1999, cell_2001)
+clocks <- left_join(clocks, cell, by = "SEQN")
+rm(list = setdiff(ls(), c("clocks")))
+
+# add glycohemoglobin
+cell_1999 <- read_xpt("Comparison_Project/LAB10.XPT") 
+cell_2001 <- read_xpt("Comparison_Project/L10_B.XPT")
+subs <- intersect(colnames(cell_1999), colnames(cell_2001))
+cell_1999 <- cell_1999 %>% select(all_of(subs))
+cell_2001 <- cell_2001 %>% select(all_of(subs))
+cell <- rbind(cell_1999, cell_2001)
+clocks <- left_join(clocks, cell, by = "SEQN")
+rm(list = setdiff(ls(), c("clocks")))
+
+# add telomere length
+cell_1999 <- read_xpt("Comparison_Project/TELO_A.XPT") 
+cell_2001 <- read_xpt("Comparison_Project/TELO_B.XPT")
+subs <- intersect(colnames(cell_1999), colnames(cell_2001))
+cell_1999 <- cell_1999 %>% select(all_of(subs))
+cell_2001 <- cell_2001 %>% select(all_of(subs))
+cell <- rbind(cell_1999, cell_2001)
+clocks <- left_join(clocks, cell, by = "SEQN")
+rm(list = setdiff(ls(), c("clocks")))
+
+# clean up dataset
+df <- clocks %>% filter(!is.na(HorvathAge))
+
+# convert percent to proportions
+df$LBXMOPCT <- df$LBXMOPCT / 100
+df$LBXLYPCT <- df$LBXLYPCT / 100
+df$LBXNEPCT <- df$LBXNEPCT / 100
+
+# tl conversion to kbps (formula provided in table)
+df$TELOMEAN <- (3274 + (2413 * df$TELOMEAN))/1000
+
+# total lymphocyte counts
+df <- df %>% 
+  mutate(tot_lymph = Bcell + CD4TPP + CD8TPP)
+
+# list of variables and name matching
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+df <- as.data.frame(as.matrix(df))
+
+# grimage conversions
+### grimage 2 components  (C-reactive protein and hemoglobin A1C) expressed on log scale
+df$CRPMort <- exp(df$CRPMort)
+df$logA1CMort <- exp(df$logA1CMort)
+
+### convert grimage components to mg/L
+df$CystatinCMort <- df$CystatinCMort * 1e-06
+df$B2MMort <- df$B2MMort * 1e-06
+
+### convert lab crp to mg/L
+df$LBXCRP <- df$LBXCRP * 10
+
+# remove sex mismatches
+df$sexFlag <- ifelse(df$XY_Estimation == 1 & df$RIAGENDR == 2, 0, 
+                     ifelse(df$XY_Estimation == 2 & df$RIAGENDR == 1, 0, 1))
+df <- subset(df, df$sexFlag == 0)
+
+```
+
+
+## Sample Summary
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+library(tableone)
+
+check <- cbind(table(df$RIDRETH1), prop.table(table(df$RIDRETH1)))
+knitr::kable(check, col.names = c("Race/Ethnicity", "N"))
+
+check <- cbind(table(df$RIAGENDR), prop.table(table(df$RIAGENDR)))
+knitr::kable(check, col.names = c("Sex", "N"))
+
+summary(df$RIDAGEYR);sd(df$RIDAGEYR)
+
+# examine missingness
+conv <- conv[, 2]
+sub <- df %>% 
+  select(all_of(conv))
+colSums(is.na(sub))
+
+# overall correlations/mae
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+clocks <- conv[c(8:14), 1]
+counter = 0
+for(i in 1:nrow(conv)){
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(dna_var, plasma_var) %>% na.omit() 
+  
+  colnames(sub) <- c("dna_var", "plasma_var")
+  
+  if(dna_var %in% clocks){
+    sub <- sub %>% filter(plasma_var != 85) 
+  } else{
+    # remove extreme outliers
+    sub <- sub %>% 
+      filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+             log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  }
+  
+  sums <- sub %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var), 
+                cor_p = cor.test(dna_var, plasma_var, method = c("pearson"))[["p.value"]]) 
+  sums$Name <- as.vector(conv[i, 3])
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- sums
+  } else{
+    fullsum <- rbind(fullsum, sums)
+  }
+}
+
+fullsum %>% 
+  mutate(clean = paste0(round(cur_cor, digits = 2), " (", round(cur_mae, digits = 2), ")")) %>% 
+  select(Name, clean)
+
+comps <- df %>% 
+  group_by(RIDRETH1) %>% 
+  summarize(mean_age = mean(RIDAGEYR), sd_age = sd(RIDAGEYR), 
+            edu_1 = sum(DMDEDUC2 == 1, na.rm = TRUE), 
+            edu_1_prop = sum(DMDEDUC2 == 1, na.rm = TRUE) / sum(DMDEDUC2 <= 5, na.rm = TRUE), 
+            edu_2 = sum(DMDEDUC2 == 2, na.rm = TRUE), 
+            edu_2_prop = sum(DMDEDUC2 == 2, na.rm = TRUE) / sum(DMDEDUC2 <= 5, na.rm = TRUE), 
+            edu_3 = sum(DMDEDUC2 == 3, na.rm = TRUE), 
+            edu_3_prop = sum(DMDEDUC2 == 3, na.rm = TRUE) / sum(DMDEDUC2 <= 5, na.rm = TRUE), 
+            edu_4 = sum(DMDEDUC2 == 4, na.rm = TRUE), 
+            edu_4_prop = sum(DMDEDUC2 == 4, na.rm = TRUE) / sum(DMDEDUC2 <= 5, na.rm = TRUE), 
+            edu_5 = sum(DMDEDUC2 == 5, na.rm = TRUE),
+            edu_5_prop = sum(DMDEDUC2 == 5, na.rm = TRUE) / sum(DMDEDUC2 <= 5, na.rm = TRUE), 
+            mean_pir = mean(INDFMPIR, na.rm = TRUE), sd_pir = sd(INDFMPIR, na.rm = TRUE), 
+            male = sum(RIAGENDR == 1), 
+            male_prop = sum(RIAGENDR == 1) / (sum(RIAGENDR == 1) + sum(RIAGENDR == 2)))
+comps$age <- paste0(round(comps$mean_age, 1), " (", round(comps$sd_age, 1), ")")
+comps$pir <- paste0(round(comps$mean_pir, 2), " (", round(comps$sd_pir, 2), ")")
+comps$sex <- paste0(round(comps$male, 1), " (", round((comps$male_prop)*100, 1), "%)")
+comps$ed1 <- paste0(round(comps$edu_1, 1), " (", round((comps$edu_1_prop)*100, 1), "%)")
+comps$ed2 <- paste0(round(comps$edu_2, 1), " (", round((comps$edu_2_prop)*100, 1), "%)")
+comps$ed3 <- paste0(round(comps$edu_3, 1), " (", round((comps$edu_3_prop)*100, 1), "%)")
+comps$ed4 <- paste0(round(comps$edu_4, 1), " (", round((comps$edu_4_prop)*100, 1), "%)")
+comps$ed5 <- paste0(round(comps$edu_5, 1), " (", round((comps$edu_5_prop)*100, 1), "%)")
+t(comps[, c(1, 18:25)])
+
+
+# add smoking 
+# https://wwwn.cdc.gov/Nchs/Nhanes/1999-2000/SMQ.htm 
+# https://wwwn.cdc.gov/Nchs/Nhanes/2001-2002/SMQ_B.htm 
+smoke_1999 <- read_xpt("SMQ.XPT")
+smoke_2001 <- read_xpt("SMQ_B.XPT")
+smoke_1999 <- smoke_1999 %>% select(SEQN, SMQ020, SMQ040)
+smoke_2001 <- smoke_2001 %>% select(SEQN, SMQ020, SMQ040)
+smoke <- as.data.frame(as.matrix(rbind(smoke_1999, smoke_2001)))
+smoke_comps <- left_join(df, smoke, by = "SEQN")
+# create an current, ever, never smoking category
+# SMQ020: 1 defines ever smoking
+# SMQ040: Do you now smoke cigarettes: 1 indicates every, 2 indicates some days 
+smoke_comps <- smoke_comps %>% 
+  mutate(SMOKE_3cat = ifelse(SMQ020 == 2, "0", 
+                      ifelse(SMQ020 == 1  & SMQ040 == 1 | SMQ040 == 2, "2", 
+                      ifelse(SMQ020 == 1  & SMQ040 == 3, "1", NA))))
+comps <- smoke_comps %>% 
+  group_by(RIDRETH1) %>% 
+  summarize(never = sum(SMOKE_3cat == 0, na.rm = TRUE), 
+            never_prop = sum(SMOKE_3cat == 0, na.rm = TRUE) / sum(SMOKE_3cat < 4, na.rm = TRUE), 
+            former = sum(SMOKE_3cat == 1, na.rm = TRUE), 
+            former_prop = sum(SMOKE_3cat == 1, na.rm = TRUE) / sum(SMOKE_3cat < 4, na.rm = TRUE), 
+            cur = sum(SMOKE_3cat == 2, na.rm = TRUE), 
+            cur_prop = sum(SMOKE_3cat == 2, na.rm = TRUE) / sum(SMOKE_3cat < 4, na.rm = TRUE))
+comps$nev <- paste0(round(comps$never, 1), " (", round((comps$never_prop)*100, 1), "%)")
+comps$form <- paste0(round(comps$former, 1), " (", round((comps$former_prop)*100, 1), "%)")
+comps$curr <- paste0(round(comps$cur, 1), " (", round((comps$cur_prop)*100, 1), "%)")
+t(comps[, c(1, 8:10)])
+
+
+
+# check extreme outliers
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+df <- as.data.frame(as.matrix(df))
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var")
+  
+  sub <- sub %>% 
+    filter(!is.na(plasma_var)) 
+  
+  # remove extreme outliers
+  sub1 <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  
+  nmiss <- nrow(sub) - nrow(sub1)
+  nmiss <- paste0(plasma_var, "_", nmiss)
+
+  counter <- counter + 1
+  if(counter==1){
+    sums <- nmiss
+  } else{ 
+    sums <- c(sums, nmiss)
+    }
+}
+sums
+
+```
+
+
+## Epigenetic Clocks 
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var")
+  
+  ########## sex-stratified subloops
+    sums <- sub %>% 
+      group_by(as.factor(RIAGENDR)) %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var))     
+
+  sums$Name <- as.vector(conv[i, 3])
+  sums$`as.factor(RIAGENDR)` <- c("Male", "Female")
+  sums <- sums %>% dplyr::rename(cats = `as.factor(RIAGENDR)`)
+  sums$facet <- paste0("Sex")
+  
+  ########## race/ethnicity subloops
+    race_sums <- sub %>% 
+      group_by(as.factor(RIDRETH1)) %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var))     
+
+  race_sums$Name <- as.vector(conv[i, 3])
+  race_sums$`as.factor(RIDRETH1)` <- c("Mexican American", "Other Hispanic", "Non-Hispanic White", 
+                                       "Non-Hispanic Black", "Other/Multi-Racial")
+  race_sums <- race_sums %>% dplyr::rename(cats = `as.factor(RIDRETH1)`)
+  race_sums$facet <- paste0("RaceEthnicity")
+  
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- rbind(sums, race_sums)
+  } else{
+    fullsum <- rbind(fullsum, sums, race_sums)
+  }
+  
+}
+
+
+a <- ggplot(subset(fullsum, facet == "RaceEthnicity"), 
+       aes(x = Name, y = cur_cor, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_jama() + 
+  xlab(NULL) + ylab("Correlation Coefficient") + 
+  scale_y_continuous(limits = c(0,1)) + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold")) + 
+  guides(fill = guide_legend(nrow = 5))
+
+
+a_mae <- ggplot(subset(fullsum, facet == "RaceEthnicity"), 
+       aes(x = Name, y = cur_mae, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_jama() + 
+  xlab(NULL) + ylab("Median Absolute Error") + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+b <- ggplot(subset(fullsum, facet == "Sex"), 
+       aes(x = Name, y = cur_cor, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_nejm() + 
+  xlab(NULL) + ylab("Correlation Coefficient") + 
+  scale_y_continuous(limits = c(0,1)) + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+b_mae <- ggplot(subset(fullsum, facet == "Sex"), 
+       aes(x = Name, y = cur_mae, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_nejm() + 
+  xlab(NULL) + ylab("Median Absolute Error") + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+overall_clocks <- fullsum
+```
+
+## Lab Measures
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+
+  ########## sex-stratified subloops
+    sums <- sub %>% 
+      group_by(as.factor(RIAGENDR)) %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var))     
+
+  sums$Name <- as.vector(conv[i, 3])
+  sums$`as.factor(RIAGENDR)` <- c("Male", "Female")
+  sums <- sums %>% dplyr::rename(cats = `as.factor(RIAGENDR)`)
+  sums$facet <- paste0("Sex")
+  
+  ########## race/ethnicity subloops
+    race_sums <- sub %>% 
+      group_by(as.factor(RIDRETH1)) %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var))     
+
+  race_sums$Name <- as.vector(conv[i, 3])
+  race_sums$`as.factor(RIDRETH1)` <- c("Mexican American", "Other Hispanic", "Non-Hispanic White", 
+                                       "Non-Hispanic Black", "Other/Multi-Racial")
+  race_sums <- race_sums %>% dplyr::rename(cats = `as.factor(RIDRETH1)`)
+  race_sums$facet <- paste0("RaceEthnicity")
+  
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- rbind(sums, race_sums)
+  } else{
+    fullsum <- rbind(fullsum, sums, race_sums)
+  }
+  
+}
+
+
+c <- ggplot(subset(fullsum, facet == "RaceEthnicity"), 
+       aes(x = Name, y = cur_cor, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_jama() + 
+  xlab(NULL) + ylab("Correlation Coefficient") + 
+  scale_y_continuous(limits = c(0,1)) + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold")) + 
+  geom_hline(linetype = "dashed", linewidth = 1, yintercept = 0.35) + 
+  guides(fill = guide_legend(nrow = 5))
+
+
+c_mae <- ggplot(subset(fullsum, facet == "RaceEthnicity"), 
+       aes(x = Name, y = cur_mae, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_jama() + 
+  xlab(NULL) + ylab("Median Absolute Error") + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+d <- ggplot(subset(fullsum, facet == "Sex"), 
+       aes(x = Name, y = cur_cor, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_nejm() + 
+  xlab(NULL) + ylab("Correlation Coefficient") + 
+  scale_y_continuous(limits = c(0,1)) + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold")) + 
+  geom_hline(linetype = "dashed", linewidth = 1, yintercept = 0.35)
+
+d_mae <- ggplot(subset(fullsum, facet == "Sex"), 
+       aes(x = Name, y = cur_mae, fill = cats, group = cats)) + 
+  geom_col(position = position_dodge(), width = 0.8) + 
+  theme_bw() + 
+  scale_fill_nejm() + 
+  xlab(NULL) + ylab("Median Absolute Error") + 
+  theme(legend.position = "bottom", legend.title = element_blank(), 
+    axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+overall_labs <- fullsum
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, out.width = '100%'}
+library(patchwork)
+
+plot1 <- a + c + plot_layout(guides = "collect") & theme(legend.position = 'right')
+plot2 <- b + d + plot_layout(guides = "collect") & theme(legend.position = 'right')
+p <- (plot1 | plot2) + plot_layout(nrow = 2) + plot_annotation(tag_levels = 'A')
+ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_Fig1.png", 
+       width = 10, height = 8, units = "in", dpi = 300)
+
+
+plot1 <- a_mae + c_mae + plot_layout(guides = "collect") & theme(legend.position = 'right')
+plot2 <- b_mae + d_mae + plot_layout(guides = "collect") & theme(legend.position = 'right')
+p <- (plot1 | plot2) + plot_layout(nrow = 2) + plot_annotation(tag_levels = 'A')
+ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_FigS1.png", 
+       width = 10, height = 8, units = "in", dpi = 300)
+
+```
+
+
+# Bootstrapped Comparisons (Main)
+
+## Epigenetic Clocks (RaceEth)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # race/eth calcs
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("Mexican_v_White", "Mexican_v_Black", "Black_v_White", 
+                       "Mexican_v_White_MAE", "Mexican_v_Black_MAE", "Black_v_White_MAE")
+  mex <- sub %>% filter(RIDRETH1 == 1)
+  white <- sub %>% filter(RIDRETH1 == 3)
+  black <- sub %>% filter(RIDRETH1 == 4)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(mex), size = nrow(mex), replace = TRUE)
+    mex_sub <- mex[indices, ]
+    indices <- sample(x = 1:nrow(white), size = nrow(white), replace = TRUE)
+    white_sub <- white[indices, ]
+    indices <- sample(x = 1:nrow(black), size = nrow(black), replace = TRUE)
+    black_sub <- black[indices, ]
+    
+    rho1 <- cor(mex_sub$plasma_var, mex_sub$dna_var)
+    rho2 <- cor(white_sub$plasma_var, white_sub$dna_var)
+    rho3 <- cor(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    dstar[b, 2] <- rho1 - rho3
+    dstar[b, 3] <- rho3 - rho2
+    
+    mae1 <- mdae(mex_sub$plasma_var, mex_sub$dna_var)
+    mae2 <- mdae(white_sub$plasma_var, white_sub$dna_var)
+    mae3 <- mdae(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 4] <- mae1 - mae2
+    dstar[b, 5] <- mae1 - mae3
+    dstar[b, 6] <- mae3 - mae2
+    
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$Mexican_v_White <- as.numeric(sums$Mexican_v_White)
+sums$Mexican_v_Black <- as.numeric(sums$Mexican_v_Black)
+sums$Black_v_White <- as.numeric(sums$Black_v_White)
+sums$Mexican_v_White_MAE <- as.numeric(sums$Mexican_v_White_MAE)
+sums$Mexican_v_Black_MAE <- as.numeric(sums$Mexican_v_Black_MAE)
+sums$Black_v_White_MAE <- as.numeric(sums$Black_v_White_MAE)
+
+r_sums <- sums %>% 
+  group_by(V7) %>% 
+  summarize(Mex_Median = quantile(Mexican_v_White, c(0.500))[1], 
+            Mex_Low_CI = quantile(Mexican_v_White, c(0.025, 0.975))[1], 
+            Mex_Up_CI = quantile(Mexican_v_White, c(0.025, 0.975))[2], 
+            White_Median = quantile(Mexican_v_Black, c(0.500))[1], 
+            White_Low_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[1], 
+            White_Up_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[2], 
+            Black_Median = quantile(Black_v_White, c(0.500))[1], 
+            Black_Low_CI = quantile(Black_v_White, c(0.025, 0.975))[1], 
+            Black_Up_CI = quantile(Black_v_White, c(0.025, 0.975))[2], 
+            
+            Mex_Median_MAE = quantile(Mexican_v_White_MAE, c(0.500))[1], 
+            Mex_Low_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[1], 
+            Mex_Up_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[2], 
+            White_Median_MAE = quantile(Mexican_v_Black_MAE, c(0.500))[1], 
+            White_Low_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[1], 
+            White_Up_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[2], 
+            Black_Median_MAE = quantile(Black_v_White_MAE, c(0.500))[1], 
+            Black_Low_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[1], 
+            Black_Up_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[2])
+
+d1 <- r_sums[, c(1, 2:4, 11:13)]
+d2 <- r_sums[, c(1, 5:7, 14:16)]
+d3 <- r_sums[, c(1, 8:10, 17:19)]
+colnames(d1) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d2) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d3) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+d1$comp <- "Mexican_v_White"
+d2$comp <- "Mexican_v_Black"
+d3$comp <- "Black_v_White"
+dat <- rbind(d1, d2, d3)
+
+dat$Name <- rep(c("Hannum", "Horvath", "Lin", "SkinBlood", "VidalBralo", 
+                     "Weidner", "Zhang"), 3)
+
+boot_clocks_race <- dat
+
+```
+
+## Epigenetic Clocks (Sex)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # race/eth calcs
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("male_v_female", "male_v_female_mae")
+  male <- sub %>% filter(RIAGENDR == 1)
+  female <- sub %>% filter(RIAGENDR == 2)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(male), size = nrow(male), replace = TRUE)
+    male_sub <- male[indices, ]
+    indices <- sample(x = 1:nrow(female), size = nrow(female), replace = TRUE)
+    female_sub <- female[indices, ]
+    
+    rho1 <- cor(male_sub$plasma_var, male_sub$dna_var)
+    rho2 <- cor(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    
+    mae1 <- mdae(male_sub$plasma_var, male_sub$dna_var)
+    mae2 <- mdae(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 2] <- mae1 - mae2
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$male_v_female <- as.numeric(sums$male_v_female)
+sums$male_v_female_mae <- as.numeric(sums$male_v_female_mae)
+
+r_sums <- sums %>% 
+  group_by(V3) %>% 
+  summarize(Median = quantile(male_v_female, c(0.500))[1], 
+            Low = quantile(male_v_female, c(0.025, 0.975))[1], 
+            Up = quantile(male_v_female, c(0.025, 0.975))[2], 
+            
+            MAE = quantile(male_v_female_mae, c(0.500))[1], 
+            Low_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[1], 
+            Up_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[2])
+
+
+r_sums$Name <- rep(c("Hannum", "Horvath", "Lin", "SkinBlood", "VidalBralo", 
+                     "Weidner", "Zhang"), 1)
+r_sums$comp <- "male_v_female"
+
+boot_clocks_sex <- r_sums
+
+```
+
+## Lab Measures (RaceEth)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  
+  # race/eth calcs
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("Mexican_v_White", "Mexican_v_Black", "Black_v_White", 
+                       "Mexican_v_White_MAE", "Mexican_v_Black_MAE", "Black_v_White_MAE")
+  mex <- sub %>% filter(RIDRETH1 == 1)
+  white <- sub %>% filter(RIDRETH1 == 3)
+  black <- sub %>% filter(RIDRETH1 == 4)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(mex), size = nrow(mex), replace = TRUE)
+    mex_sub <- mex[indices, ]
+    indices <- sample(x = 1:nrow(white), size = nrow(white), replace = TRUE)
+    white_sub <- white[indices, ]
+    indices <- sample(x = 1:nrow(black), size = nrow(black), replace = TRUE)
+    black_sub <- black[indices, ]
+    
+    rho1 <- cor(mex_sub$plasma_var, mex_sub$dna_var)
+    rho2 <- cor(white_sub$plasma_var, white_sub$dna_var)
+    rho3 <- cor(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    dstar[b, 2] <- rho1 - rho3
+    dstar[b, 3] <- rho3 - rho2
+    
+    mae1 <- mdae(mex_sub$plasma_var, mex_sub$dna_var)
+    mae2 <- mdae(white_sub$plasma_var, white_sub$dna_var)
+    mae3 <- mdae(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 4] <- mae1 - mae2
+    dstar[b, 5] <- mae1 - mae3
+    dstar[b, 6] <- mae3 - mae2
+    
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$Mexican_v_White <- as.numeric(sums$Mexican_v_White)
+sums$Mexican_v_Black <- as.numeric(sums$Mexican_v_Black)
+sums$Black_v_White <- as.numeric(sums$Black_v_White)
+sums$Mexican_v_White_MAE <- as.numeric(sums$Mexican_v_White_MAE)
+sums$Mexican_v_Black_MAE <- as.numeric(sums$Mexican_v_Black_MAE)
+sums$Black_v_White_MAE <- as.numeric(sums$Black_v_White_MAE)
+
+r_sums <- sums %>% 
+  group_by(V7) %>% 
+  summarize(Mex_Median = quantile(Mexican_v_White, c(0.500))[1], 
+            Mex_Low_CI = quantile(Mexican_v_White, c(0.025, 0.975))[1], 
+            Mex_Up_CI = quantile(Mexican_v_White, c(0.025, 0.975))[2], 
+            White_Median = quantile(Mexican_v_Black, c(0.500))[1], 
+            White_Low_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[1], 
+            White_Up_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[2], 
+            Black_Median = quantile(Black_v_White, c(0.500))[1], 
+            Black_Low_CI = quantile(Black_v_White, c(0.025, 0.975))[1], 
+            Black_Up_CI = quantile(Black_v_White, c(0.025, 0.975))[2], 
+            
+            Mex_Median_MAE = quantile(Mexican_v_White_MAE, c(0.500))[1], 
+            Mex_Low_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[1], 
+            Mex_Up_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[2], 
+            White_Median_MAE = quantile(Mexican_v_Black_MAE, c(0.500))[1], 
+            White_Low_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[1], 
+            White_Up_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[2], 
+            Black_Median_MAE = quantile(Black_v_White_MAE, c(0.500))[1], 
+            Black_Low_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[1], 
+            Black_Up_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[2])
+
+d1 <- r_sums[, c(1, 2:4, 11:13)]
+d2 <- r_sums[, c(1, 5:7, 14:16)]
+d3 <- r_sums[, c(1, 8:10, 17:19)]
+colnames(d1) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d2) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d3) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+d1$comp <- "Mexican_v_White"
+d2$comp <- "Mexican_v_Black"
+d3$comp <- "Black_v_White"
+dat <- rbind(d1, d2, d3)
+
+dat$Name <- rep(c("B2M", "CRP", "CystatinC", "Telomere Length", 
+                  "Monocytes", "Neutrophils", "HbA1C", "Lymphocytes"), 3)
+
+boot_lab_race <- dat
+
+```
+
+## Lab Measures (Sex)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  
+  # race/eth calcs
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("male_v_female", "male_v_female_mae")
+  male <- sub %>% filter(RIAGENDR == 1)
+  female <- sub %>% filter(RIAGENDR == 2)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(male), size = nrow(male), replace = TRUE)
+    male_sub <- male[indices, ]
+    indices <- sample(x = 1:nrow(female), size = nrow(female), replace = TRUE)
+    female_sub <- female[indices, ]
+    
+    rho1 <- cor(male_sub$plasma_var, male_sub$dna_var)
+    rho2 <- cor(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    
+    mae1 <- mdae(male_sub$plasma_var, male_sub$dna_var)
+    mae2 <- mdae(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 2] <- mae1 - mae2
+    
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$male_v_female <- as.numeric(sums$male_v_female)
+sums$male_v_female_mae <- as.numeric(sums$male_v_female_mae)
+
+r_sums <- sums %>% 
+  group_by(V3) %>% 
+  summarize(Median = quantile(male_v_female, c(0.500))[1], 
+            Low = quantile(male_v_female, c(0.025, 0.975))[1], 
+            Up = quantile(male_v_female, c(0.025, 0.975))[2], 
+            
+            MAE = quantile(male_v_female_mae, c(0.500))[1], 
+            Low_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[1], 
+            Up_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[2])
+
+
+r_sums$Name <- rep(c("B2M", "CRP", "Cystatin C", "Telomere Length", 
+                     "Monocytes", "Neutrophils", "HbA1C", "Lymphocytes"), 1)
+r_sums$comp <- "male_v_female"
+
+boot_lab_sex <- r_sums
+
+save(overall_clocks, overall_labs, 
+     boot_clocks_race, boot_clocks_sex,
+     boot_lab_race, boot_lab_sex, 
+     file = "Comparison_Project/NHANES_Comp_Summaries.RData")
+
+```
+
+```{r}
+### corr plots
+load("Comparison_Project/NHANES_Comp_Summaries.RData")
+boot_clocks_race$sig <- ifelse(boot_clocks_race$Low < 0 & boot_clocks_race$Up < 0, 
+                               paste0(round(boot_clocks_race$Median, digits = 3)), 
+                        ifelse(boot_clocks_race$Low > 0 & boot_clocks_race$Up > 0,  
+                               paste0(round(boot_clocks_race$Median, digits = 3)), ""))
+boot_clocks_race$Comp <- ifelse(boot_clocks_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_clocks_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_clocks_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+a <- ggplot(boot_clocks_race, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+
+boot_lab_race$sig <- ifelse(boot_lab_race$Low < 0 & boot_lab_race$Up < 0, 
+                               paste0(round(boot_lab_race$Median, digits = 3)), 
+                        ifelse(boot_lab_race$Low > 0 & boot_lab_race$Up > 0,  
+                               paste0(round(boot_lab_race$Median, digits = 3)), ""))
+boot_lab_race$Comp <- ifelse(boot_lab_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_lab_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_lab_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+b_cor <- ggplot(boot_lab_race, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+boot_clocks_sex$sig <- ifelse(boot_clocks_sex$Low < 0 & boot_clocks_sex$Up < 0, 
+                               paste0(round(boot_clocks_sex$Median, digits = 3)), 
+                        ifelse(boot_clocks_sex$Low > 0 & boot_clocks_sex$Up > 0,  
+                               paste0(round(boot_clocks_sex$Median, digits = 3)), ""))
+boot_clocks_sex$Comp <- "Male compared \n to Female"
+
+c <- ggplot(boot_clocks_sex, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+boot_lab_sex$sig <- ifelse(boot_lab_sex$Low < 0 & boot_lab_sex$Up < 0, 
+                               paste0(round(boot_lab_sex$Median, digits = 3)), 
+                        ifelse(boot_lab_sex$Low > 0 & boot_lab_sex$Up > 0,  
+                               paste0(round(boot_lab_sex$Median, digits = 3)), ""))
+boot_lab_sex$Comp <- "Male compared \n to Female"
+
+d <- ggplot(boot_lab_sex, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+plot1 <- a + b_cor + plot_layout(guides = "collect") & theme(legend.position = 'right')
+plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'right')
+p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
+p
+
+ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_Fig2.png", 
+       width = 12, height = 8, units = "in", dpi = 300)
+
+
+
+
+### MAE plots
+load("Comparison_Project/NHANES_Comp_Summaries.RData")
+boot_clocks_race$sig <- ifelse(boot_clocks_race$MAE_Low < 0 & boot_clocks_race$MAE_Up < 0, 
+                               paste0(round(boot_clocks_race$MAE, digits = 3)), 
+                        ifelse(boot_clocks_race$MAE_Low > 0 & boot_clocks_race$MAE_Up > 0,  
+                               paste0(round(boot_clocks_race$MAE, digits = 3)), ""))
+boot_clocks_race$Comp <- ifelse(boot_clocks_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_clocks_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_clocks_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+a <- ggplot(boot_clocks_race, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+
+boot_lab_race$sig <- ifelse(boot_lab_race$MAE_Low < 0 & boot_lab_race$MAE_Up < 0, 
+                               paste0(round(boot_lab_race$MAE, digits = 3)), 
+                        ifelse(boot_lab_race$MAE_Low > 0 & boot_lab_race$MAE_Up > 0,  
+                               paste0(round(boot_lab_race$MAE, digits = 3)), ""))
+boot_lab_race$Comp <- ifelse(boot_lab_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_lab_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_lab_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+b_mae <- ggplot(boot_lab_race, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), 
+    axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+
+boot_clocks_sex$sig <- ifelse(boot_clocks_sex$Low_MAE < 0 & boot_clocks_sex$Up_MAE < 0, 
+                               paste0(round(boot_clocks_sex$MAE, digits = 3)), 
+                        ifelse(boot_clocks_sex$Low_MAE > 0 & boot_clocks_sex$Up_MAE > 0,  
+                               paste0(round(boot_clocks_sex$MAE, digits = 3)), ""))
+boot_clocks_sex$Comp <- "Male compared \n to Female"
+
+c <- ggplot(boot_clocks_sex, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+boot_lab_sex$sig <- ifelse(boot_lab_sex$Low_MAE < 0 & boot_lab_sex$Up_MAE < 0, 
+                               paste0(round(boot_lab_sex$MAE, digits = 3)), 
+                        ifelse(boot_lab_sex$Low_MAE > 0 & boot_lab_sex$Up_MAE > 0,  
+                               paste0(round(boot_lab_sex$MAE, digits = 3)), ""))
+boot_lab_sex$Comp <- "Male compared \n to Female"
+
+d <- ggplot(boot_lab_sex, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+plot1 <- a + b_mae + plot_layout(guides = "collect") & theme(legend.position = 'right')
+plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'right')
+p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
+p
+
+ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_Fig3.png", 
+       width = 12, height = 8, units = "in", dpi = 300)
+```
+
+```{r}
+### table display
+load("Comparison_Project/NHANES_Comp_Summaries.RData")
+check <- overall_clocks %>% 
+  mutate(display_cor = format(round(cur_cor, digits = 3), nsmall = 3), 
+         display_mae = format(round(cur_mae, digits = 3), nsmall = 3)) %>% 
+  mutate(display = paste0(display_cor, " (", display_mae, ")")) %>% 
+  select(Name, cats, display) %>% filter(cats != "Male" & cats != "Female")
+t(check)
+check <- overall_clocks %>% 
+  mutate(display_cor = format(round(cur_cor, digits = 3), nsmall = 3), 
+         display_mae = format(round(cur_mae, digits = 3), nsmall = 3)) %>% 
+  mutate(display = paste0(display_cor, " (", display_mae, ")")) %>% 
+  select(Name, cats, display) %>% filter(cats == "Male" | cats == "Female")
+t(check)
+
+check <- overall_labs %>% 
+  mutate(display_cor = format(round(cur_cor, digits = 3), nsmall = 3), 
+         display_mae = format(round(cur_mae, digits = 3), nsmall = 3)) %>% 
+  mutate(display = paste0(display_cor, " (", display_mae, ")")) %>% 
+  select(Name, cats, display) %>% filter(cats != "Male" & cats != "Female")
+t(check)
+check <- overall_labs %>% 
+  mutate(display_cor = format(round(cur_cor, digits = 3), nsmall = 3), 
+         display_mae = format(round(cur_mae, digits = 3), nsmall = 3)) %>% 
+  mutate(display = paste0(display_cor, " (", display_mae, ")")) %>% 
+  select(Name, cats, display) %>% filter(cats == "Male" | cats == "Female")
+t(check)
+
+
+check <- boot_clocks_race %>% 
+  mutate(display_cor = paste0(format(round(Median, digits = 3), nsmall = 3), " (", 
+                          format(round(Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(display_mae = paste0(format(round(MAE, digits = 3), nsmall = 3), " (", 
+                          format(round(MAE_Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(MAE_Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(comb = paste0(display_cor, "  ", display_mae)) %>%
+  select(comp, Name, comb) 
+t(check)
+
+check <- boot_lab_race %>% 
+  arrange(Name) %>% 
+  mutate(display_cor = paste0(format(round(Median, digits = 3), nsmall = 3), " (", 
+                          format(round(Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(display_mae = paste0(format(round(MAE, digits = 3), nsmall = 3), " (", 
+                          format(round(MAE_Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(MAE_Up, digits = 3), nsmall = 3), ")")) %>% 
+  select(comp, Name, display_cor, display_mae) %>% 
+  mutate(comb = paste0(display_cor, "  ", display_mae)) %>%
+  select(comp, Name, comb) 
+t(check)
+
+
+comb <- rbind(boot_clocks_sex, boot_lab_sex)
+comb %>% 
+  mutate(display_cor = paste0(format(round(Median, digits = 3), nsmall = 3), " (", 
+                          format(round(Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(display_mae = paste0(format(round(MAE, digits = 3), nsmall = 3), " (", 
+                          format(round(Low_MAE, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up_MAE, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(comp = paste0(display_cor, "  ", display_mae)) %>%
+  select(Name, comp) 
+
+```
+
+
+
+# Bootstrapped Comparisons (Smallest Sample Sensitivity)
+
+## Epigenetic Clocks (RaceEth)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # race/eth calcs
+  check <- sub %>% group_by(RIDRETH1) %>% filter(RIDRETH1 != 2 & RIDRETH1 != 5) %>% summarize(n()) 
+  n <- min(check$`n()`) 
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("Mexican_v_White", "Mexican_v_Black", "Black_v_White", 
+                       "Mexican_v_White_MAE", "Mexican_v_Black_MAE", "Black_v_White_MAE")
+  mex <- sub %>% filter(RIDRETH1 == 1)
+  white <- sub %>% filter(RIDRETH1 == 3)
+  black <- sub %>% filter(RIDRETH1 == 4)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(mex), size = n, replace = TRUE)
+    mex_sub <- mex[indices, ]
+    indices <- sample(x = 1:nrow(white), size = n, replace = TRUE)
+    white_sub <- white[indices, ]
+    indices <- sample(x = 1:nrow(black), size = n, replace = TRUE)
+    black_sub <- black[indices, ]
+    
+    rho1 <- cor(mex_sub$plasma_var, mex_sub$dna_var)
+    rho2 <- cor(white_sub$plasma_var, white_sub$dna_var)
+    rho3 <- cor(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    dstar[b, 2] <- rho1 - rho3
+    dstar[b, 3] <- rho3 - rho2
+    
+    mae1 <- mdae(mex_sub$plasma_var, mex_sub$dna_var)
+    mae2 <- mdae(white_sub$plasma_var, white_sub$dna_var)
+    mae3 <- mdae(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 4] <- mae1 - mae2
+    dstar[b, 5] <- mae1 - mae3
+    dstar[b, 6] <- mae3 - mae2
+    
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$Mexican_v_White <- as.numeric(sums$Mexican_v_White)
+sums$Mexican_v_Black <- as.numeric(sums$Mexican_v_Black)
+sums$Black_v_White <- as.numeric(sums$Black_v_White)
+sums$Mexican_v_White_MAE <- as.numeric(sums$Mexican_v_White_MAE)
+sums$Mexican_v_Black_MAE <- as.numeric(sums$Mexican_v_Black_MAE)
+sums$Black_v_White_MAE <- as.numeric(sums$Black_v_White_MAE)
+
+r_sums <- sums %>% 
+  group_by(V7) %>% 
+  summarize(Mex_Median = quantile(Mexican_v_White, c(0.500))[1], 
+            Mex_Low_CI = quantile(Mexican_v_White, c(0.025, 0.975))[1], 
+            Mex_Up_CI = quantile(Mexican_v_White, c(0.025, 0.975))[2], 
+            White_Median = quantile(Mexican_v_Black, c(0.500))[1], 
+            White_Low_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[1], 
+            White_Up_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[2], 
+            Black_Median = quantile(Black_v_White, c(0.500))[1], 
+            Black_Low_CI = quantile(Black_v_White, c(0.025, 0.975))[1], 
+            Black_Up_CI = quantile(Black_v_White, c(0.025, 0.975))[2], 
+            
+            Mex_Median_MAE = quantile(Mexican_v_White_MAE, c(0.500))[1], 
+            Mex_Low_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[1], 
+            Mex_Up_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[2], 
+            White_Median_MAE = quantile(Mexican_v_Black_MAE, c(0.500))[1], 
+            White_Low_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[1], 
+            White_Up_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[2], 
+            Black_Median_MAE = quantile(Black_v_White_MAE, c(0.500))[1], 
+            Black_Low_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[1], 
+            Black_Up_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[2])
+
+d1 <- r_sums[, c(1, 2:4, 11:13)]
+d2 <- r_sums[, c(1, 5:7, 14:16)]
+d3 <- r_sums[, c(1, 8:10, 17:19)]
+colnames(d1) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d2) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d3) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+d1$comp <- "Mexican_v_White"
+d2$comp <- "Mexican_v_Black"
+d3$comp <- "Black_v_White"
+dat <- rbind(d1, d2, d3)
+
+dat$Name <- rep(c("Hannum", "Horvath", "Lin", "SkinBlood", "VidalBralo", 
+                     "Weidner", "Zhang"), 3)
+
+boot_clocks_race <- dat
+
+```
+
+## Epigenetic Clocks (Sex)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # sex calcs
+  check <- sub %>% group_by(RIAGENDR) %>% summarize(n()) 
+  n <- min(check$`n()`) 
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("male_v_female", "male_v_female_mae")
+  male <- sub %>% filter(RIAGENDR == 1)
+  female <- sub %>% filter(RIAGENDR == 2)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(male), size = n, replace = TRUE)
+    male_sub <- male[indices, ]
+    indices <- sample(x = 1:nrow(female), size = n, replace = TRUE)
+    female_sub <- female[indices, ]
+    
+    rho1 <- cor(male_sub$plasma_var, male_sub$dna_var)
+    rho2 <- cor(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    
+    mae1 <- mdae(male_sub$plasma_var, male_sub$dna_var)
+    mae2 <- mdae(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 2] <- mae1 - mae2
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$male_v_female <- as.numeric(sums$male_v_female)
+sums$male_v_female_mae <- as.numeric(sums$male_v_female_mae)
+
+r_sums <- sums %>% 
+  group_by(V3) %>% 
+  summarize(Median = quantile(male_v_female, c(0.500))[1], 
+            Low = quantile(male_v_female, c(0.025, 0.975))[1], 
+            Up = quantile(male_v_female, c(0.025, 0.975))[2], 
+            
+            MAE = quantile(male_v_female_mae, c(0.500))[1], 
+            Low_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[1], 
+            Up_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[2])
+
+
+r_sums$Name <- rep(c("Hannum", "Horvath", "Lin", "SkinBlood", "VidalBralo", 
+                     "Weidner", "Zhang"), 1)
+r_sums$comp <- "male_v_female"
+
+boot_clocks_sex <- r_sums
+
+```
+
+## Lab Measures (RaceEth)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  
+  # race/eth calcs
+  check <- sub %>% group_by(RIDRETH1) %>% filter(RIDRETH1 != 2 & RIDRETH1 != 5) %>% summarize(n()) 
+  n <- min(check$`n()`) 
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("Mexican_v_White", "Mexican_v_Black", "Black_v_White", 
+                       "Mexican_v_White_MAE", "Mexican_v_Black_MAE", "Black_v_White_MAE")
+  mex <- sub %>% filter(RIDRETH1 == 1)
+  white <- sub %>% filter(RIDRETH1 == 3)
+  black <- sub %>% filter(RIDRETH1 == 4)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(mex), size = n, replace = TRUE)
+    mex_sub <- mex[indices, ]
+    indices <- sample(x = 1:nrow(white), size = n, replace = TRUE)
+    white_sub <- white[indices, ]
+    indices <- sample(x = 1:nrow(black), size = n, replace = TRUE)
+    black_sub <- black[indices, ]
+    
+    rho1 <- cor(mex_sub$plasma_var, mex_sub$dna_var)
+    rho2 <- cor(white_sub$plasma_var, white_sub$dna_var)
+    rho3 <- cor(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    dstar[b, 2] <- rho1 - rho3
+    dstar[b, 3] <- rho3 - rho2
+    
+    mae1 <- mdae(mex_sub$plasma_var, mex_sub$dna_var)
+    mae2 <- mdae(white_sub$plasma_var, white_sub$dna_var)
+    mae3 <- mdae(black_sub$plasma_var, black_sub$dna_var)
+    dstar[b, 4] <- mae1 - mae2
+    dstar[b, 5] <- mae1 - mae3
+    dstar[b, 6] <- mae3 - mae2
+    
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$Mexican_v_White <- as.numeric(sums$Mexican_v_White)
+sums$Mexican_v_Black <- as.numeric(sums$Mexican_v_Black)
+sums$Black_v_White <- as.numeric(sums$Black_v_White)
+sums$Mexican_v_White_MAE <- as.numeric(sums$Mexican_v_White_MAE)
+sums$Mexican_v_Black_MAE <- as.numeric(sums$Mexican_v_Black_MAE)
+sums$Black_v_White_MAE <- as.numeric(sums$Black_v_White_MAE)
+
+r_sums <- sums %>% 
+  group_by(V7) %>% 
+  summarize(Mex_Median = quantile(Mexican_v_White, c(0.500))[1], 
+            Mex_Low_CI = quantile(Mexican_v_White, c(0.025, 0.975))[1], 
+            Mex_Up_CI = quantile(Mexican_v_White, c(0.025, 0.975))[2], 
+            White_Median = quantile(Mexican_v_Black, c(0.500))[1], 
+            White_Low_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[1], 
+            White_Up_CI = quantile(Mexican_v_Black, c(0.025, 0.975))[2], 
+            Black_Median = quantile(Black_v_White, c(0.500))[1], 
+            Black_Low_CI = quantile(Black_v_White, c(0.025, 0.975))[1], 
+            Black_Up_CI = quantile(Black_v_White, c(0.025, 0.975))[2], 
+            
+            Mex_Median_MAE = quantile(Mexican_v_White_MAE, c(0.500))[1], 
+            Mex_Low_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[1], 
+            Mex_Up_CI_MAE = quantile(Mexican_v_White_MAE, c(0.025, 0.975))[2], 
+            White_Median_MAE = quantile(Mexican_v_Black_MAE, c(0.500))[1], 
+            White_Low_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[1], 
+            White_Up_CI_MAE = quantile(Mexican_v_Black_MAE, c(0.025, 0.975))[2], 
+            Black_Median_MAE = quantile(Black_v_White_MAE, c(0.500))[1], 
+            Black_Low_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[1], 
+            Black_Up_CI_MAE = quantile(Black_v_White_MAE, c(0.025, 0.975))[2])
+
+d1 <- r_sums[, c(1, 2:4, 11:13)]
+d2 <- r_sums[, c(1, 5:7, 14:16)]
+d3 <- r_sums[, c(1, 8:10, 17:19)]
+colnames(d1) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d2) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+colnames(d3) <- c("V4", "Median", "Low", "Up", "MAE", "MAE_Low", "MAE_Up")
+d1$comp <- "Mexican_v_White"
+d2$comp <- "Mexican_v_Black"
+d3$comp <- "Black_v_White"
+dat <- rbind(d1, d2, d3)
+
+dat$Name <- rep(c("B2M", "CRP", "CystatinC", "Telomere Length", 
+                  "Monocytes", "Neutrophils", "HbA1C", "Lymphocytes"), 3)
+
+boot_lab_race <- dat
+
+```
+
+## Lab Measures (Sex)
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+df <- as.data.frame(as.matrix(df))
+
+counter = 0
+for(i in 1:nrow(conv)){
+
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1","dna_var", "plasma_var")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  
+  # sex calcs
+  check <- sub %>% group_by(RIAGENDR) %>% summarize(n()) 
+  n <- min(check$`n()`) 
+  ## Set some constants:
+  set.seed(9999)
+  B <- 10000 # number of bootstrap replicates
+  ## Initialize an empty dataframe for bootstrap statistics:
+  dstar <- cbind(rep(NA, B), rep(NA, B))
+  colnames(dstar) <- c("male_v_female", "male_v_female_mae")
+  male <- sub %>% filter(RIAGENDR == 1)
+  female <- sub %>% filter(RIAGENDR == 2)
+
+  ## Run the bootstrap procedure for correlation:
+  for (b in 1:B) {
+    
+    indices <- sample(x = 1:nrow(male), size = n, replace = TRUE)
+    male_sub <- male[indices, ]
+    indices <- sample(x = 1:nrow(female), size = n, replace = TRUE)
+    female_sub <- female[indices, ]
+    
+    rho1 <- cor(male_sub$plasma_var, male_sub$dna_var)
+    rho2 <- cor(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 1] <- rho1 - rho2
+    
+    mae1 <- mdae(male_sub$plasma_var, male_sub$dna_var)
+    mae2 <- mdae(female_sub$plasma_var, female_sub$dna_var)
+    dstar[b, 2] <- mae1 - mae2
+    
+  }
+  dstar <- cbind(dstar, rep(paste0(dna_var, "_v_", plasma_var), b))
+  
+  counter = counter + 1
+  if(counter == 1){
+    sums <- dstar
+  } else{
+    sums <- rbind(sums, dstar)
+  }
+}
+
+sums <- as.data.frame(sums)
+sums$male_v_female <- as.numeric(sums$male_v_female)
+sums$male_v_female_mae <- as.numeric(sums$male_v_female_mae)
+
+r_sums <- sums %>% 
+  group_by(V3) %>% 
+  summarize(Median = quantile(male_v_female, c(0.500))[1], 
+            Low = quantile(male_v_female, c(0.025, 0.975))[1], 
+            Up = quantile(male_v_female, c(0.025, 0.975))[2], 
+            
+            MAE = quantile(male_v_female_mae, c(0.500))[1], 
+            Low_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[1], 
+            Up_MAE = quantile(male_v_female_mae, c(0.025, 0.975))[2])
+
+
+r_sums$Name <- rep(c("B2M", "CRP", "Cystatin C", "Telomere Length", 
+                     "Monocytes", "Neutrophils", "HbA1C", "Lymphocytes"), 1)
+r_sums$comp <- "male_v_female"
+
+boot_lab_sex <- r_sums
+
+save(boot_clocks_race, boot_clocks_sex,
+     boot_lab_race, boot_lab_sex, 
+     file = "Comparison_Project/NHANES_Comp_Summaries_Sens.RData")
+
+```
+
+```{r}
+### corr plots
+load("Comparison_Project/NHANES_Comp_Summaries_Sens.RData")
+boot_clocks_race$sig <- ifelse(boot_clocks_race$Low < 0 & boot_clocks_race$Up < 0, 
+                               paste0(round(boot_clocks_race$Median, digits = 3)), 
+                        ifelse(boot_clocks_race$Low > 0 & boot_clocks_race$Up > 0,  
+                               paste0(round(boot_clocks_race$Median, digits = 3)), ""))
+boot_clocks_race$Comp <- ifelse(boot_clocks_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_clocks_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_clocks_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+a <- ggplot(boot_clocks_race, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+
+boot_lab_race$sig <- ifelse(boot_lab_race$Low < 0 & boot_lab_race$Up < 0, 
+                               paste0(round(boot_lab_race$Median, digits = 3)), 
+                        ifelse(boot_lab_race$Low > 0 & boot_lab_race$Up > 0,  
+                               paste0(round(boot_lab_race$Median, digits = 3)), ""))
+boot_lab_race$Comp <- ifelse(boot_lab_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_lab_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_lab_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+b_cor <- ggplot(boot_lab_race, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+boot_clocks_sex$sig <- ifelse(boot_clocks_sex$Low < 0 & boot_clocks_sex$Up < 0, 
+                               paste0(round(boot_clocks_sex$Median, digits = 3)), 
+                        ifelse(boot_clocks_sex$Low > 0 & boot_clocks_sex$Up > 0,  
+                               paste0(round(boot_clocks_sex$Median, digits = 3)), ""))
+boot_clocks_sex$Comp <- "Male compared \n to Female"
+
+c <- ggplot(boot_clocks_sex, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+boot_lab_sex$sig <- ifelse(boot_lab_sex$Low < 0 & boot_lab_sex$Up < 0, 
+                               paste0(round(boot_lab_sex$Median, digits = 3)), 
+                        ifelse(boot_lab_sex$Low > 0 & boot_lab_sex$Up > 0,  
+                               paste0(round(boot_lab_sex$Median, digits = 3)), ""))
+boot_lab_sex$Comp <- "Male compared \n to Female"
+
+d <- ggplot(boot_lab_sex, aes(x = Name, y = Comp, fill = Median, fontface = "bold")) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-0.25, 0.25), name = "Median \n Difference \n in Corr.") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+plot1 <- a + b_cor + plot_layout(guides = "collect") & theme(legend.position = 'right')
+plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'right')
+p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
+p
+
+ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_FigS2.png", 
+       width = 12, height = 8, units = "in", dpi = 300)
+
+
+
+
+### MAE plots
+load("Comparison_Project/NHANES_Comp_Summaries_Sens.RData")
+boot_clocks_race$sig <- ifelse(boot_clocks_race$MAE_Low < 0 & boot_clocks_race$MAE_Up < 0, 
+                               paste0(round(boot_clocks_race$MAE, digits = 3)), 
+                        ifelse(boot_clocks_race$MAE_Low > 0 & boot_clocks_race$MAE_Up > 0,  
+                               paste0(round(boot_clocks_race$MAE, digits = 3)), ""))
+boot_clocks_race$Comp <- ifelse(boot_clocks_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_clocks_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_clocks_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+a <- ggplot(boot_clocks_race, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+
+boot_lab_race$sig <- ifelse(boot_lab_race$MAE_Low < 0 & boot_lab_race$MAE_Up < 0, 
+                               paste0(round(boot_lab_race$MAE, digits = 3)), 
+                        ifelse(boot_lab_race$MAE_Low > 0 & boot_lab_race$MAE_Up > 0,  
+                               paste0(round(boot_lab_race$MAE, digits = 3)), ""))
+boot_lab_race$Comp <- ifelse(boot_lab_race$comp == "Mexican_v_White", 
+                                "Mexican American \n compared to \n NH White", 
+                              ifelse(boot_lab_race$comp == "Mexican_v_Black", 
+                                "Mexican American \n compared to \n NH Black", 
+                              ifelse(boot_lab_race$comp == "Black_v_White", 
+                                "NH Black \n compared to \n NH White", "")))
+
+b_mae <- ggplot(boot_lab_race, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_blank(), 
+    axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+
+boot_clocks_sex$sig <- ifelse(boot_clocks_sex$Low_MAE < 0 & boot_clocks_sex$Up_MAE < 0, 
+                               paste0(round(boot_clocks_sex$MAE, digits = 3)), 
+                        ifelse(boot_clocks_sex$Low_MAE > 0 & boot_clocks_sex$Up_MAE > 0,  
+                               paste0(round(boot_clocks_sex$MAE, digits = 3)), ""))
+boot_clocks_sex$Comp <- "Male compared \n to Female"
+
+c <- ggplot(boot_clocks_sex, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_text(size = 12, face = "bold"), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+boot_lab_sex$sig <- ifelse(boot_lab_sex$Low_MAE < 0 & boot_lab_sex$Up_MAE < 0, 
+                               paste0(round(boot_lab_sex$MAE, digits = 3)), 
+                        ifelse(boot_lab_sex$Low_MAE > 0 & boot_lab_sex$Up_MAE > 0,  
+                               paste0(round(boot_lab_sex$MAE, digits = 3)), ""))
+boot_lab_sex$Comp <- "Male compared \n to Female"
+
+d <- ggplot(boot_lab_sex, aes(x = Name, y = Comp, fill = MAE)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0, 
+                       limits = c(-1.5, 1.5), name = "Median \n Difference \n in MAE") + 
+  theme_classic() + 
+  xlab(NULL) + ylab(NULL) + 
+  geom_text(aes(label = sig, fontface = "bold")) +   
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 90, vjust = 0.5, hjust=1), 
+    axis.text.y = element_blank(), 
+    axis.title = element_text(size = 12, face = "bold"))
+
+
+plot1 <- a + b_mae + plot_layout(guides = "collect") & theme(legend.position = 'right')
+plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'right')
+p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
+p
+
+ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_FigS3.png", 
+       width = 12, height = 8, units = "in", dpi = 300)
+```
+
+
+# Individual Plots
+```{r}
+library(patchwork)
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+clocks <- conv[8:14, 1]
+df <- as.data.frame(as.matrix(df))
+
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var")
+  
+  if(dna_var %in% clocks){
+    sub <- sub %>% filter(plasma_var != 85)
+  } else{
+    # remove extreme outliers
+    sub <- sub %>% 
+      filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+             log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+  }
+  
+  ########## sex-stratified plots
+  sums <- sub %>% 
+      group_by(as.factor(RIAGENDR)) %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var))     
+  sums$Name <- as.vector(conv[i, 3])
+  sums$`as.factor(RIAGENDR)` <- c("Male", "Female")
+  sums <- sums %>% dplyr::rename(cats = `as.factor(RIAGENDR)`)
+  male_cor <- sums %>% filter(cats == "Male") %>% select(cur_cor) %>% unlist()
+  female_cor <- sums %>% filter(cats == "Female") %>% select(cur_cor) %>% unlist()
+  n <- sub %>% 
+      group_by(as.factor(RIAGENDR)) %>% 
+      tally()
+  male_n <- unlist(n[1,2])
+  female_n <- unlist(n[2,2])
+  a <- ggplot(sub, aes(x = dna_var, y = plasma_var, color = as.factor(RIAGENDR))) + 
+      geom_point(alpha = 0.5, size = 2) + 
+      theme_bw() + scale_color_nejm() + 
+      xlab(paste0("DNAm-derived ",as.vector(conv[i, 3]) ," Levels (", as.vector(conv[i, 6]), ")")) + 
+      ylab(paste0("Lab-derived ",as.vector(conv[i, 3]) ," Levels (", as.vector(conv[i, 6]), ")")) + 
+      facet_wrap(~ RIAGENDR, nrow = 1, labeller = labeller(RIAGENDR = 
+        c("1" = paste0("Male \n Corr = ", 
+                       round(male_cor, digits = 3), ", N = ", male_n),
+          "2" = paste0("Female \n Corr = ", 
+                       round(female_cor, digits = 3), ", N = ", female_n)))) + 
+      theme(legend.position = "none", 
+        strip.text = element_text(size = 12, face = "bold"), 
+        axis.text = element_text(size = 12, face = "bold"), 
+        axis.title = element_text(size = 12, face = "bold")) + 
+      geom_abline(linetype = "dashed", color = "black") +
+      geom_smooth(method = "lm", se = FALSE)
+  if(dna_var %in% clocks){
+    a = a + ylab("Chronological Age (Years)")
+  }
+
+  ########## race/ethnicity plots
+  race_sums <- sub %>% 
+      group_by(as.factor(RIDRETH1)) %>% 
+      summarize(cur_cor = as.numeric(cor(dna_var, plasma_var, use = "complete.obs")), 
+                cur_mae = mdae(dna_var, plasma_var))     
+  race_sums$Name <- as.vector(conv[i, 3])
+  race_sums$`as.factor(RIDRETH1)` <- c("Mexican American", "Other Hispanic", "Non-Hispanic White", 
+                                       "Non-Hispanic Black", "Other/Multi-Racial")
+  race_sums <- race_sums %>% dplyr::rename(cats = `as.factor(RIDRETH1)`)
+  mex_cor <- race_sums %>% filter(cats == "Mexican American") %>% select(cur_cor) %>% unlist()
+  his_cor <- race_sums %>% filter(cats == "Other Hispanic") %>% select(cur_cor) %>% unlist()
+  white_cor <- race_sums %>% filter(cats == "Non-Hispanic White") %>% select(cur_cor) %>% unlist()
+  black_cor <- race_sums %>% filter(cats == "Non-Hispanic Black") %>% select(cur_cor) %>% unlist()
+  other_cor <- race_sums %>% filter(cats == "Other/Multi-Racial") %>% select(cur_cor) %>% unlist()
+  n <- sub %>% 
+      group_by(as.factor(RIDRETH1)) %>% 
+      tally()
+  mex_n <- unlist(n[1,2])
+  his_n <- unlist(n[2,2])
+  white_n <- unlist(n[3,2])
+  black_n <- unlist(n[4,2])
+  other_n <- unlist(n[5,2]) 
+  b <- ggplot(sub, aes(x = dna_var, y = plasma_var, color = as.factor(RIDRETH1))) + 
+      geom_point(alpha = 0.5, size = 2) + 
+      theme_bw() + scale_color_nejm() + 
+      xlab(paste0("DNAm-derived ",as.vector(conv[i, 3]) ," Levels (", as.vector(conv[i, 6]), ")")) + 
+      ylab(paste0("Lab-derived ",as.vector(conv[i, 3]) ," Levels (", as.vector(conv[i, 6]), ")")) + 
+      facet_wrap(~ RIDRETH1, nrow = 3, labeller = labeller(RIDRETH1 = 
+        c("1" = paste0("Mexican American \n Corr = ", 
+                       round(mex_cor, digits = 3), ", N = ", mex_n),
+          "2" = paste0("Other Hispanic \n Corr = ", 
+                       round(his_cor, digits = 3), ", N = ", his_n),
+        "3" = paste0("Non-Hispanic White \n Corr = ", 
+                     round(white_cor, digits = 3), ", N = ", white_n), 
+        "4" = paste0("Non-Hispanic Black \n Corr = ", 
+                     round(black_cor, digits = 3), ", N = ", black_n), 
+        "5" = paste0("Other/Multiracial \n Corr = ", 
+                     round(other_cor, digits = 3), ", N = ", other_n)))) + 
+      theme(legend.position = "none", 
+        strip.text = element_text(size = 12, face = "bold"), 
+        axis.text = element_text(size = 12, face = "bold"), 
+        axis.title = element_text(size = 12, face = "bold")) + 
+      geom_abline(linetype = "dashed", color = "black") +
+      geom_smooth(method = "lm", se = FALSE)
+  if(dna_var %in% clocks){
+    b = b + ylab("Chronological Age (Years)")
+  }
+  
+  p <- (b | a) + plot_layout(nrow = 2, heights = c(3, 1)) 
+
+  ggsave(p, filename = paste0("Comparison_Project/Plots/Ind/Correlations_", conv[i, 3],".png"), 
+       width = 8, height = 10, units = "in", dpi = 300)
+}
+
+```
+
+
