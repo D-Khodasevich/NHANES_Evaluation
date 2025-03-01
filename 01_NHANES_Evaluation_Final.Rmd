@@ -83,7 +83,7 @@ df$LBXMOPCT <- df$LBXMOPCT / 100
 df$LBXLYPCT <- df$LBXLYPCT / 100
 df$LBXNEPCT <- df$LBXNEPCT / 100
 
-# tl conversion to kbps (formula provided in table)
+# tl conversion to kbps (formula provided in documentation)
 df$TELOMEAN <- (3274 + (2413 * df$TELOMEAN))/1000
 
 # total lymphocyte counts
@@ -197,7 +197,7 @@ comps$ed5 <- paste0(round(comps$edu_5, 1), " (", round((comps$edu_5_prop)*100, 1
 t(comps[, c(1, 18:25)])
 
 
-# add smoking 
+# add smoking summary
 # https://wwwn.cdc.gov/Nchs/Nhanes/1999-2000/SMQ.htm 
 # https://wwwn.cdc.gov/Nchs/Nhanes/2001-2002/SMQ_B.htm 
 smoke_1999 <- read_xpt("SMQ.XPT")
@@ -232,6 +232,8 @@ t(comps[, c(1, 8:10)])
 conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
 conv <- conv[c(1:7, 15), ]
 df <- as.data.frame(as.matrix(df))
+
+sums_list <- list()
 counter = 0
 for(i in 1:nrow(conv)){
   
@@ -251,6 +253,10 @@ for(i in 1:nrow(conv)){
   
   nmiss <- nrow(sub) - nrow(sub1)
   nmiss <- paste0(plasma_var, "_", nmiss)
+  
+  sums_list[[i]] <- sub1 %>% 
+    group_by(RIDRETH1) %>% 
+    summarize(mean_val = mean(plasma_var, na.rm = TRUE), sd_val = sd(plasma_var, na.rm = TRUE))
 
   counter <- counter + 1
   if(counter==1){
@@ -260,6 +266,13 @@ for(i in 1:nrow(conv)){
     }
 }
 sums
+
+# lab measure summaries
+names(sums_list) <- conv[, 2]
+plas_s1 <- do.call(rbind.data.frame, sums_list)
+plas_s1$var <- row.names(plas_s1)
+plas_s1$display <- paste0(round(plas_s1$mean_val, 2), " (", round(plas_s1$sd_val, 2), ")")
+print(plas_s1 %>% select(RIDRETH1, var, display), n = 40)
 
 ```
 
@@ -477,15 +490,15 @@ library(patchwork)
 plot1 <- a + c + plot_layout(guides = "collect") & theme(legend.position = 'right')
 plot2 <- b + d + plot_layout(guides = "collect") & theme(legend.position = 'right')
 p <- (plot1 | plot2) + plot_layout(nrow = 2) + plot_annotation(tag_levels = 'A')
-ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_Fig1.png", 
-       width = 10, height = 8, units = "in", dpi = 300)
+ggsave(p, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_Fig1.png", 
+       width = 10, height = 8, units = "in", dpi = 500)
 
 
 plot1 <- a_mae + c_mae + plot_layout(guides = "collect") & theme(legend.position = 'right')
 plot2 <- b_mae + d_mae + plot_layout(guides = "collect") & theme(legend.position = 'right')
 p <- (plot1 | plot2) + plot_layout(nrow = 2) + plot_annotation(tag_levels = 'A')
-ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_FigS1.png", 
-       width = 10, height = 8, units = "in", dpi = 300)
+ggsave(p, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_FigS1.png", 
+       width = 10, height = 8, units = "in", dpi = 500)
 
 ```
 
@@ -969,8 +982,8 @@ plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'righ
 p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
 p
 
-ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_Fig2.png", 
-       width = 12, height = 8, units = "in", dpi = 300)
+ggsave(p, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_Fig2.png", 
+       width = 12, height = 8, units = "in", dpi = 500)
 
 
 
@@ -1066,8 +1079,8 @@ plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'righ
 p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
 p
 
-ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_Fig3.png", 
-       width = 12, height = 8, units = "in", dpi = 300)
+ggsave(p, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_Fig3.png", 
+       width = 12, height = 8, units = "in", dpi = 500)
 ```
 
 ```{r}
@@ -1626,8 +1639,8 @@ plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'righ
 p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
 p
 
-ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_FigS2.png", 
-       width = 12, height = 8, units = "in", dpi = 300)
+ggsave(p, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_FigS3.png", 
+       width = 12, height = 8, units = "in", dpi = 500)
 
 
 
@@ -1723,9 +1736,53 @@ plot2 <- c + d + plot_layout(guides = "collect") & theme(legend.position = 'righ
 p <- (plot1 | plot2) + plot_layout(nrow = 2, heights = c(3, 1)) + plot_annotation(tag_levels = 'A')
 p
 
-ggsave(p, filename = "Comparison_Project/Plots/NHANES_Evaluation_FigS3.png", 
-       width = 12, height = 8, units = "in", dpi = 300)
+ggsave(p, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_FigS4.png", 
+       width = 12, height = 8, units = "in", dpi = 500)
 ```
+
+```{r}
+### table display
+load("Comparison_Project/NHANES_Comp_Summaries_Sens.RData")
+
+check <- boot_clocks_race %>% 
+  mutate(display_cor = paste0(format(round(Median, digits = 3), nsmall = 3), " (", 
+                          format(round(Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(display_mae = paste0(format(round(MAE, digits = 3), nsmall = 3), " (", 
+                          format(round(MAE_Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(MAE_Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(comb = paste0(display_cor, "  ", display_mae)) %>%
+  select(comp, Name, comb) 
+t(check)
+
+check <- boot_lab_race %>% 
+  arrange(Name) %>% 
+  mutate(display_cor = paste0(format(round(Median, digits = 3), nsmall = 3), " (", 
+                          format(round(Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(display_mae = paste0(format(round(MAE, digits = 3), nsmall = 3), " (", 
+                          format(round(MAE_Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(MAE_Up, digits = 3), nsmall = 3), ")")) %>% 
+  select(comp, Name, display_cor, display_mae) %>% 
+  mutate(comb = paste0(display_cor, "  ", display_mae)) %>%
+  select(comp, Name, comb) 
+t(check)
+
+
+comb <- rbind(boot_clocks_sex, boot_lab_sex)
+comb %>% 
+  mutate(display_cor = paste0(format(round(Median, digits = 3), nsmall = 3), " (", 
+                          format(round(Low, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(display_mae = paste0(format(round(MAE, digits = 3), nsmall = 3), " (", 
+                          format(round(Low_MAE, digits = 3), nsmall = 3), ", ", 
+                          format(round(Up_MAE, digits = 3), nsmall = 3), ")")) %>% 
+  mutate(comp = paste0(display_cor, "  ", display_mae)) %>%
+  select(Name, comp) 
+
+```
+
+
 
 
 # Individual Plots
@@ -1838,7 +1895,7 @@ for(i in 1:nrow(conv)){
   
   p <- (b | a) + plot_layout(nrow = 2, heights = c(3, 1)) 
 
-  ggsave(p, filename = paste0("Comparison_Project/Plots/Ind/Correlations_", conv[i, 3],".png"), 
+  ggsave(p, filename = paste0("Comparison_Project/Manuscript/ClinEpi/Plots/FigS2/Correlations_", conv[i, 3],".png"), 
        width = 8, height = 10, units = "in", dpi = 300)
 }
 

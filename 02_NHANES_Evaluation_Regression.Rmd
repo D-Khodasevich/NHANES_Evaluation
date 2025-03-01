@@ -1,0 +1,634 @@
+---
+title: "NHANES Evaluation Regression"
+output: html_document
+date: '2025-02-26'
+---
+
+
+```{r}
+### load chunk 1 in "01_NHANES_Evaluation.Rmd" 
+df$RIDRETH1 <- factor(df$RIDRETH1, levels = c("3", "1", "2", "4", "5")) # set NH white as ref
+df$RIAGENDR <- factor(df$RIAGENDR, levels = c("2", "1"))                # set female as ref
+```
+
+
+
+# Regression Analysis (Minimally-adjusted)
+
+## Epigenetic Clocks 
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var")
+  
+  ########## sex-stratified subloops
+    fit <- glm(dna_var ~ plasma_var*RIAGENDR + RIDRETH1, data = sub)
+    sums <- summary(fit)$coefficients[c(2, 8), ]
+    sums <- cbind(sums, suppressMessages(confint(fit))[c(2, 8), ])
+    colnames(sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    sums <- as.data.frame(sums)
+    sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    sums$facet <- paste0("Sex")
+    sums$term <- c("Phenotype", "Phenotype*Male")
+  
+  ########## race/ethnicity subloops
+    fit <- glm(dna_var ~ plasma_var*RIDRETH1 + RIAGENDR, data = sub)
+    race_sums <- summary(fit)$coefficients[c(2, 8:11), ]
+    race_sums <- cbind(race_sums, suppressMessages(confint(fit))[c(2, 8:11), ])
+    colnames(race_sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    race_sums <- as.data.frame(race_sums)
+    race_sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    race_sums$facet <- paste0("RaceEthnicity")
+    race_sums$term <- c("Phenotype", "Phenotype*Mexican", "Phenotype*Other Hispanic", 
+                        "Phenotype*NH Black", "Phenotype*Other")
+      
+  
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- rbind(sums, race_sums)
+  } else{
+    fullsum <- rbind(fullsum, sums, race_sums)
+  }
+}
+
+clocks <- fullsum
+```
+
+## Lab Measures
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:7, 15), ]
+
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+
+  ########## sex-stratified subloops
+    fit <- glm(dna_var ~ plasma_var*RIAGENDR + RIDRETH1, data = sub)
+    sums <- summary(fit)$coefficients[c(2, 8), ]
+    sums <- cbind(sums, suppressMessages(confint(fit))[c(2, 8), ])
+    colnames(sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    sums <- as.data.frame(sums)
+    sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    sums$facet <- paste0("Sex")
+    sums$term <- c("Phenotype", "Phenotype*Male")
+  
+  ########## race/ethnicity subloops
+    fit <- glm(dna_var ~ plasma_var*RIDRETH1 + RIAGENDR, data = sub)
+    race_sums <- summary(fit)$coefficients[c(2, 8:11), ]
+    race_sums <- cbind(race_sums, suppressMessages(confint(fit))[c(2, 8:11), ])
+    colnames(race_sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    race_sums <- as.data.frame(race_sums)
+    race_sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    race_sums$facet <- paste0("RaceEthnicity")
+    race_sums$term <- c("Phenotype", "Phenotype*Mexican", "Phenotype*Other Hispanic", 
+                        "Phenotype*NH Black", "Phenotype*Other")
+      
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- rbind(sums, race_sums)
+  } else{
+    fullsum <- rbind(fullsum, sums, race_sums)
+  }
+}
+
+labs <- fullsum
+```
+
+Table organization
+15 predictors * 2 sex categories * 5 race/ethnicity categories = 150 tests
+```{r}
+
+table_df <- rbind(clocks, labs)
+
+table_df$display <- paste(format(round(table_df$Estimate, digits = 2), nsmall = 2), " (", 
+                      format(round(table_df$CI_low, digits = 2), nsmall = 2), ", ", 
+                      format(round(table_df$CI_up, digits = 2), nsmall = 2), ")")
+
+table_df$p_display <- formatC(table_df$p, format = "e", digits = 2)
+table_df$p_ind <- ifelse(table_df$p < 0.05 & table_df$p > 0.05 / 150, "*", 
+                     ifelse(table_df$p < 0.05 / 150, "**", ""))
+
+table_df %>% filter(facet == "RaceEthnicity") %>% select(facet, Name, term, display, p_display, p_ind)
+table_df %>% filter(facet != "RaceEthnicity") %>% select(facet, Name, term, display, p_display, p_ind)
+
+
+```
+
+
+Plots
+```{r}
+# plots
+library(ggsci)
+
+table_df$sig_display <- paste0(table_df$display, table_df$p_ind)
+tab <- subset(table_df, table_df$facet == "RaceEthnicity")
+
+a <- ggplot(subset(tab, Name == "Horvath")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Horvath Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+b <- ggplot(subset(tab, Name == "Hannum")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Hannum Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+c <- ggplot(subset(tab, Name == "SkinBlood")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Skin&Blood Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+d <- ggplot(subset(tab, Name == "Lin")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Lin Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+e <- ggplot(subset(tab, Name == "Weidner")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Weidner Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet()
+
+f <- ggplot(subset(tab, Name == "VidalBralo")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Vidal-Bralo Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet()
+
+g <- ggplot(subset(tab, Name == "Zhang")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Zhang Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+h <- ggplot(subset(tab, Name == "Telomere Length")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Telomere Length") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+i <- ggplot(subset(tab, Name == "Lymphocytes")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Lymphocytes") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+j <- ggplot(subset(tab, Name == "Monocytes")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Monocytes") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+k <- ggplot(subset(tab, Name == "Neutrophils")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Neutrophils") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet()
+
+
+l <- ggplot(subset(tab, Name == "B2M")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("B2M") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+m <- ggplot(subset(tab, Name == "CystatinC")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Cystatin C") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+n <- ggplot(subset(tab, Name == "CRP")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("CRP") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet()
+
+o <- ggplot(subset(tab, Name == "HbA1C")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("HbA1c") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_lancet() 
+
+library(patchwork)
+
+full <- a+b+c+d+e+f+g+h+i+j+k+l+m+n+o +
+  plot_layout(ncol = 3, guides = 'collect') & theme(legend.position = "bottom")
+ggsave(full, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/Fig4.png", 
+       width = 12, height = 9, units = "in", dpi = 500)
+```
+
+```{r}
+# plots
+library(ggsci)
+
+table_df$sig_display <- paste0(table_df$display, table_df$p_ind)
+tab <- subset(table_df, table_df$facet != "RaceEthnicity")
+
+a <- ggplot(subset(tab, Name == "Horvath")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Horvath Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+b <- ggplot(subset(tab, Name == "Hannum")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Hannum Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+c <- ggplot(subset(tab, Name == "SkinBlood")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Skin&Blood Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+d <- ggplot(subset(tab, Name == "Lin")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Lin Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+e <- ggplot(subset(tab, Name == "Weidner")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Weidner Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3()
+
+f <- ggplot(subset(tab, Name == "VidalBralo")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Vidal-Bralo Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3()
+
+g <- ggplot(subset(tab, Name == "Zhang")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Zhang Clock") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+h <- ggplot(subset(tab, Name == "Telomere Length")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Telomere Length") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+i <- ggplot(subset(tab, Name == "Lymphocytes")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Lymphocytes") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+j <- ggplot(subset(tab, Name == "Monocytes")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Monocytes") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+k <- ggplot(subset(tab, Name == "Neutrophils")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Neutrophils") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3()
+
+
+l <- ggplot(subset(tab, Name == "B2M")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("B2M") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+m <- ggplot(subset(tab, Name == "CystatinC")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("Cystatin C") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+n <- ggplot(subset(tab, Name == "CRP")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("CRP") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3()
+
+o <- ggplot(subset(tab, Name == "HbA1C")) + 
+  geom_pointrange(aes(y = fct_inorder(sig_display), x = Estimate, xmin = CI_low, 
+                      xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
+  scale_y_discrete(position = "right", limits = rev) + 
+  theme_bw() + ggtitle("HbA1c") + xlab(NULL) + ylab(NULL) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme(legend.title = element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_text(face="bold", colour = "black")) + 
+  scale_color_d3() 
+
+library(patchwork)
+
+full <- a+b+c+d+e+f+g+h+i+j+k+l+m+n+o +
+  plot_layout(ncol = 3, guides = 'collect') & theme(legend.position = "bottom")
+ggsave(full, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/FigS5.png", 
+       width = 12, height = 9, units = "in", dpi = 500)
+```
+
+
+# Regression Analysis (Cell and SES adjusted)
+
+## Clock Measures
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[8:14, ]
+
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% filter(RIDAGEYR != 85) %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var, 
+                  CD8TPP,CD4TPP,Nkcell,Bcell,MonoPP,NeuPP,DMDEDUC2,INDFMPIR) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var", 
+                     "CD8TPP","CD4TPP","Nkcell","Bcell","MonoPP","NeuPP","DMDEDUC2","INDFMPIR")
+
+  ########## sex-stratified subloops
+    fit <- glm(dna_var ~ plasma_var*RIAGENDR + RIDRETH1 + 
+                 CD8TPP + CD4TPP + Nkcell + Bcell + MonoPP + NeuPP + 
+                 factor(DMDEDUC2) + INDFMPIR, data = sub)
+    sums <- summary(fit)$coefficients[c(2, 20), ]
+    sums <- cbind(sums, suppressMessages(confint(fit))[c(2, 20), ])
+    colnames(sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    sums <- as.data.frame(sums)
+    sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    sums$facet <- paste0("Sex")
+    sums$term <- c("Phenotype", "Phenotype*Male")
+  
+  ########## race/ethnicity subloops
+    fit <- glm(dna_var ~ plasma_var*RIDRETH1 + RIAGENDR + 
+                 CD8TPP + CD4TPP + Nkcell + Bcell + MonoPP + NeuPP + 
+                 factor(DMDEDUC2) + INDFMPIR, data = sub)
+    race_sums <- summary(fit)$coefficients[c(2, 20:23), ]
+    race_sums <- cbind(race_sums, suppressMessages(confint(fit))[c(2, 20:23), ])
+    colnames(race_sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    race_sums <- as.data.frame(race_sums)
+    race_sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    race_sums$facet <- paste0("RaceEthnicity")
+    race_sums$term <- c("Phenotype", "Phenotype*Mexican", "Phenotype*Other Hispanic", 
+                        "Phenotype*NH Black", "Phenotype*Other")
+      
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- rbind(sums, race_sums)
+  } else{
+    fullsum <- rbind(fullsum, sums, race_sums)
+  }
+}
+
+clocks <- fullsum
+```
+
+## Lab Measures
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# dataframe linking DNAm measures to their corresponding actual measures
+conv <- as.matrix(readxl::read_xlsx("Comparison_Project/grim_plasma_conversions.xlsx"))
+conv <- conv[c(1:4, 15), ]
+
+counter = 0
+for(i in 1:nrow(conv)){
+  
+  dna_var <- as.vector(conv[i, 1])
+  plasma_var <- as.vector(conv[i, 2])
+  sub <- df %>% 
+    dplyr::select(RIAGENDR, RIDRETH1, dna_var, plasma_var, 
+                  CD8TPP,CD4TPP,Nkcell,Bcell,MonoPP,NeuPP,DMDEDUC2,INDFMPIR) %>% na.omit() 
+  colnames(sub) <- c("RIAGENDR", "RIDRETH1", "dna_var", "plasma_var", 
+                     "CD8TPP","CD4TPP","Nkcell","Bcell","MonoPP","NeuPP","DMDEDUC2","INDFMPIR")
+  
+  # remove extreme outliers
+  sub <- sub %>% 
+    filter(log(plasma_var) <= (mean(log(plasma_var)) + 3*sd(log(plasma_var))) & 
+                          log(plasma_var) >= (mean(log(plasma_var)) - 3*sd(log(plasma_var))))
+
+  ########## sex-stratified subloops
+    fit <- glm(dna_var ~ plasma_var*RIAGENDR + RIDRETH1 + 
+                 CD8TPP + CD4TPP + Nkcell + Bcell + MonoPP + NeuPP + DMDEDUC2 + INDFMPIR, data = sub)
+    sums <- summary(fit)$coefficients[c(2, 16), ]
+    sums <- cbind(sums, suppressMessages(confint(fit))[c(2, 16), ])
+    colnames(sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    sums <- as.data.frame(sums)
+    sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    sums$facet <- paste0("Sex")
+    sums$term <- c("Phenotype", "Phenotype*Male")
+  
+  ########## race/ethnicity subloops
+    fit <- glm(dna_var ~ plasma_var*RIDRETH1 + RIAGENDR + 
+                 CD8TPP + CD4TPP + Nkcell + Bcell + MonoPP + NeuPP + DMDEDUC2 + INDFMPIR, data = sub)
+    race_sums <- summary(fit)$coefficients[c(2, 16:19), ]
+    race_sums <- cbind(race_sums, suppressMessages(confint(fit))[c(2, 16:19), ])
+    colnames(race_sums) <- c("Estimate", "SE", "t", "p", "CI_low", "CI_up")
+    race_sums <- as.data.frame(race_sums)
+    race_sums$Name <- paste0(as.matrix(conv[i, 3])[1])
+    race_sums$facet <- paste0("RaceEthnicity")
+    race_sums$term <- c("Phenotype", "Phenotype*Mexican", "Phenotype*Other Hispanic", 
+                        "Phenotype*NH Black", "Phenotype*Other")
+      
+  counter = counter + 1
+  if(counter == 1){
+    fullsum <- rbind(sums, race_sums)
+  } else{
+    fullsum <- rbind(fullsum, sums, race_sums)
+  }
+}
+
+labs <- fullsum
+```
+
+Table organization
+12 predictors * 2 sex categories * 5 race/ethnicity categories = 120 tests
+```{r}
+
+table_df <- rbind(clocks, labs)
+
+table_df$display <- paste(format(round(table_df$Estimate, digits = 2), nsmall = 2), " (", 
+                      format(round(table_df$CI_low, digits = 2), nsmall = 2), ", ", 
+                      format(round(table_df$CI_up, digits = 2), nsmall = 2), ")")
+
+table_df$p_display <- formatC(table_df$p, format = "e", digits = 2)
+table_df$p_ind <- ifelse(table_df$p < 0.05 & table_df$p > 0.05 / 120, "*", 
+                     ifelse(table_df$p < 0.05 / 120, "**", ""))
+
+table_df %>% filter(facet == "RaceEthnicity") %>% select(Name, term, display, p_display, p_ind)
+table_df %>% filter(facet != "RaceEthnicity") %>% select(Name, term, display, p_display, p_ind)
+
+```
+
+
+
