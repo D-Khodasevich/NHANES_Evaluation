@@ -717,7 +717,8 @@ g <- ggplot(subset(tab, Name == "Zhang")) +
   scale_color_lancet() 
 
 telo_sub <- subset(tab, Name == "Telomere Length") # specific code because of 2 terms with same display
-telo_sub$term <- factor(telo_sub$term, levels = telo_sub$term)
+telo_sub$term <- factor(telo_sub$term, levels = c("Phenotype", "Phenotype*Mexican",
+"Phenotype*NH Black", "Phenotype*Other", "Phenotype*Other Hispanic"))
 h <- ggplot(telo_sub) + 
   geom_pointrange(aes(y = fct_inorder(term), x = Estimate, xmin = CI_low, 
                       xmax = CI_up, color = term), size = 1, linewidth = 1.5) + 
@@ -777,7 +778,7 @@ o <- ggplot(subset(tab, Name == "HbA1C")) +
 
 library(patchwork)
 
-full <- a+b+c+d+e+f+g+h+l+m+n+o +
+full <- a+b+c+d+e+f+g+(h + guides(color = "none"))+l+m+n+o +
   plot_layout(ncol = 3, guides = 'collect') & theme(legend.position = "bottom")
 ggsave(full, filename = "Comparison_Project/Manuscript/ClinEpi/Plots/NHANES_Evaluation_FigS6.png", 
        width = 12, height = 9, units = "in", dpi = 500)
